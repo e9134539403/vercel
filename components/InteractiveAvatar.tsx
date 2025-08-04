@@ -73,7 +73,7 @@ function InteractiveAvatar() {
 
   /* ---------- SOFT RECYCLE EACH 10 MIN ---------- */
   useEffect(() => {
-    const TEN_MIN = 10 * 60 * 1000; // production: 10 мин; уменьшите на dev
+    const TREE_MIN = 3 * 60 * 1000; // production: 3 мин; уменьшите на dev
 
     const id = setInterval(async () => {
       try {
