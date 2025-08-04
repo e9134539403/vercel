@@ -79,13 +79,12 @@ function InteractiveAvatar() {
     try {
       if (sessionState === StreamingAvatarSessionState.CONNECTED && reason !== "disconnect") {
         await stopAvatar();
-        // короткая пауза — не ждём, пока sessionState обновится
         await new Promise(r => setTimeout(r, 400));
       }
 
       const token = await fetchAccessToken();
       const avatar = initAvatar(token);
-      wireDisconnect(avatar);
+      wireDisconnect(avatar); // <<— теперь функция объявлена ниже
       await startAvatar(configRef.current);
 
       if (isVoiceChatRef.current) {
@@ -96,6 +95,27 @@ function InteractiveAvatar() {
       console.error("recycle failed", e);
     } finally {
       recyclingRef.current = false;
+    }
+  });
+
+  /* ---------- wireDisconnect helper ---------- */
+  const wireDisconnect = (avatar: any) => {
+    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => recycleSession("disconnect"));
+  };
+
+  /* ---------- manual start (Voice/Text) ---------- */
+  const startSession = useMemoizedFn(async (needVoice: boolean) => {
+    try {
+      const tok = await fetchAccessToken();
+      const avatar = initAvatar(tok);
+      wireDisconnect(avatar);
+      await startAvatar(configRef.current);
+      if (needVoice) {
+        await startVoiceChat();
+        isVoiceChatRef.current = true;
+      }
+    } catch (e) {
+      console.error("startSession error", e);
     }
   });
 
