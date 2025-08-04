@@ -69,21 +69,21 @@ function InteractiveAvatar() {
     const TEN_MIN = 3 * 60 * 1000;        // 600 000 мс
 
     const id = setInterval(async () => {
-      if (!avatar.current) return;         // на всякий случай
 
       try {
-        // 1) культурно остановить текущую сессию
-        await avatar.current.stopAvatar();
+        // 1) корректно остановить текущую сессию
+  await stopAvatar();
 
-        // 2) получить свежий токен
-        const token = await fetchAccessToken();
+  // 2) получить новый токен и проинициализировать SDK
+  const token = await fetchAccessToken();
+  await initAvatar(token);        // обновили внутренний avatar-ref
 
-        // 3) запустить заново с тем же config
-        await avatar.current.startAvatar(token, config);
+  // 3) запустить заново с тем же config
+  await startAvatar(config);
 
-        console.info("Avatar session recycled");
-      } catch (e) {
-        console.error("Recycle failed", e);
+  console.info("Avatar session recycled");
+} catch (e) {
+  console.error("Recycle failed", e);
       }
     }, TEN_MIN);
 
