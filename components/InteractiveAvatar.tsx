@@ -71,7 +71,7 @@ function InteractiveAvatar() {
     return token;
   };
 
-  /* ---------- SOFT RECYCLE EACH 10 MIN ---------- */
+  /* ---------- SOFT RECYCLE EACH 3 MIN ---------- */
   useEffect(() => {
     const TREE_MIN = 3 * 60 * 1000; // production: 3 мин; уменьшите на dev
 
