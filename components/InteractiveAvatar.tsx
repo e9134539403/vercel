@@ -78,7 +78,9 @@ function InteractiveAvatar() {
     const id = setInterval(async () => {
       try {
         // 1) корректно остановить текущую сессию (ждём полного закрытия)
-        await stopAvatar({ force: true });
+        await stopAvatar(); // корректно остановить текущую сессию
+        // небольшой буфер, чтобы сервер закрыл соединение
+        await new Promise((r) => setTimeout(r, 500));
 
         // 2) новый токен + ре‑инициализация SDK
         const token = await fetchAccessToken();
