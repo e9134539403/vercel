@@ -1,4 +1,4 @@
-// --- InteractiveAvatar.tsx (stable recycle, 3‑min timer) ---
+// --- InteractiveAvatar.tsx (no global recycle, only soft restarts) ---
 
 import {
   AvatarQuality,
@@ -34,28 +34,23 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
     model: ElevenLabsModel.eleven_flash_v2_5,
   },
   language: "en",
-  activityIdleTimeout: 900, // 15‑min peer‑conn timeout
+  activityIdleTimeout: 900,
   voiceChatTransport: VoiceChatTransport.WEBSOCKET,
   sttSettings: { provider: STTProvider.DEEPGRAM },
 };
 
 function InteractiveAvatar() {
-  const {
-    initAvatar,
-    startAvatar,
-    stopAvatar,
-    sessionState,
-    stream,
-  } = useStreamingAvatarSession();
+  const { initAvatar, startAvatar, stopAvatar, sessionState, stream } =
+    useStreamingAvatarSession();
   const { startVoiceChat } = useVoiceChat();
 
   const [config, setConfig] = useState<StartAvatarRequest>(DEFAULT_CONFIG);
   const configRef = useRef(config);
-  useEffect(() => { configRef.current = config; }, [config]);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   const isVoiceChatRef = useRef(false);
-  const recyclingRef = useRef(false); // <-- блокируем параллельные recycle
-
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const fetchAccessToken = async () => {
@@ -63,65 +58,23 @@ function InteractiveAvatar() {
     return res.text();
   };
 
-  /* ---------- timer: recycle каждые 3 мин ---------- */
-  useEffect(() => {
-    const THREE_MIN = 3 * 60 * 1000;
-    const id = setInterval(() => recycleSession("timer"), THREE_MIN);
-    return () => clearInterval(id);
-  }, []);
-
-  /* ---------- recycleSession ---------- */
-  const recycleSession = useMemoizedFn(async (reason: string) => {
-    if (recyclingRef.current) return;
-    recyclingRef.current = true;
-    console.warn(`♻️ recycle triggered (${reason})`);
-
-    const hardStop = async () => {
-      try { await stopAvatar(); } catch { /* ignore */ }
-      await new Promise(r => setTimeout(r, 600));
-    };
-
+  /* ---------- helper to soft‑restart only media pipeline ---------- */
+  const softRestartTracks = useMemoizedFn(async () => {
     try {
-      await hardStop();
-      const token = await fetchAccessToken();
-      const avatar = initAvatar(token);
-      wireDisconnect(avatar);
-
-      const safeStart = async () => {
-        try {
-          await startAvatar(configRef.current);
-        } catch (err: any) {
-          if (err?.message?.includes("already an active session")) {
-            console.warn("retry startAvatar after active-session error");
-            await hardStop();
-            await startAvatar(configRef.current);
-          } else {
-            throw err;
-          }
-        }
-      };
-
-      await safeStart();
-      if (isVoiceChatRef.current) await startVoiceChat();
-      console.info("✅ Avatar session recycled (forced)");
+      await startVoiceChat();
+      console.info("🟢 soft restart tracks done");
     } catch (e) {
-      console.error("recycle failed", e);
-    } finally {
-      recyclingRef.current = false;
+      console.error("soft restart failed", e);
     }
   });
 
-  /* ---------- disconnect listener helper ---------- */
-  const wireDisconnect = (avatar: any) => {
-    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => recycleSession("disconnect"));
-  };
-
-  /* ---------- manual start (Voice/Text) ---------- */
+  /* ---------- manual session start ---------- */
   const startSession = useMemoizedFn(async (needVoice: boolean) => {
     try {
-      const tok = await fetchAccessToken();
-      const avatar = initAvatar(tok);
-      wireDisconnect(avatar);
+      const token = await fetchAccessToken();
+      const avatar = initAvatar(token);
+      avatar.on(StreamingEvents.STREAM_DISCONNECTED, softRestartTracks);
+
       await startAvatar(configRef.current);
       if (needVoice) {
         await startVoiceChat();
@@ -134,7 +87,7 @@ function InteractiveAvatar() {
 
   useUnmount(() => stopAvatar());
 
-  /* ---------- video binding ---------- */
+  /* ---------- bind video ---------- */
   useEffect(() => {
     if (stream && videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -142,25 +95,20 @@ function InteractiveAvatar() {
     }
   }, [stream]);
 
-  /* ---------- freeze watchdog (audio / video) ---------- */
+  /* ---------- freeze watchdog ---------- */
   useEffect(() => {
     let prev = 0;
-    const id = setInterval(async () => {
+    const id = setInterval(() => {
       const v = videoRef.current;
       if (!v) return;
-      if (v.currentTime === prev) {
-        // видео не продвигается → пробуем перезапустить только voice‑chat
-        console.warn("⚠️ media freeze detected → soft restart tracks");
-        try {
-          await startVoiceChat(); // создает новый audio/media pipeline без закрытия peer‑connection
-        } catch (e) {
-          console.error("soft restart failed", e);
-        }
+      if (v.currentTime === prev && sessionState === StreamingAvatarSessionState.CONNECTED) {
+        console.warn("⚠️ media freeze → soft restart");
+        softRestartTracks();
       }
       prev = v.currentTime;
-    }, 10_000); // проверяем каждые 10 с
+    }, 10_000);
     return () => clearInterval(id);
-  }, [startVoiceChat]);
+  }, [softRestartTracks, sessionState]);
 
   /* ---------- JSX ---------- */
   return (
