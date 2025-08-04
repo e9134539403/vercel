@@ -72,14 +72,16 @@ function InteractiveAvatar() {
 
   /* ---------- recycleSession ---------- */
   const recycleSession = useMemoizedFn(async (reason: string) => {
-    if (recyclingRef.current) return;           // уже в процессе
+    if (recyclingRef.current) return; // already running
     recyclingRef.current = true;
     console.warn(`♻️ recycle triggered (${reason})`);
 
     try {
-      await stopAvatar();                       // посылаем stop
-      // ждём когда сессия реально станет INACTIVE (max 5 c)
-      await waitUntil(() => sessionState === StreamingAvatarSessionState.INACTIVE, 5000);
+      if (sessionState === StreamingAvatarSessionState.CONNECTED && reason !== "disconnect") {
+        await stopAvatar();
+        // короткая пауза — не ждём, пока sessionState обновится
+        await new Promise(r => setTimeout(r, 400));
+      }
 
       const token = await fetchAccessToken();
       const avatar = initAvatar(token);
@@ -89,44 +91,13 @@ function InteractiveAvatar() {
       if (isVoiceChatRef.current) {
         await startVoiceChat();
       }
-      console.info("✅ Avatar session recycled");
+      console.info("✅ Avatar session recycled (fast)");
     } catch (e) {
       console.error("recycle failed", e);
     } finally {
       recyclingRef.current = false;
     }
   });
-
-  /* ---------- helper waitUntil ---------- */
-  const waitUntil = (cond: () => boolean, timeout = 5000, step = 100) =>
-    new Promise<void>((res, rej) => {
-      const start = Date.now();
-      const t = setInterval(() => {
-        if (cond()) { clearInterval(t); res(); }
-        if (Date.now() - start > timeout) { clearInterval(t); rej(new Error("waitUntil timeout")); }
-      }, step);
-    });
-
-  /* ---------- connect buttons ---------- */
-  const startSession = useMemoizedFn(async (needVoice: boolean) => {
-    try {
-      const token = await fetchAccessToken();
-      const avatar = initAvatar(token);
-      wireDisconnect(avatar);
-      await startAvatar(configRef.current);
-      if (needVoice) {
-        await startVoiceChat();
-        isVoiceChatRef.current = true;
-      }
-    } catch (e) {
-      console.error("start session error", e);
-    }
-  });
-
-  /* ---------- STREAM_DISCONNECTED listener ---------- */
-  const wireDisconnect = (avatar: any) => {
-    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => recycleSession("disconnect"));
-  };
 
   useUnmount(() => stopAvatar());
 
