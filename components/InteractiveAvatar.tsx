@@ -111,6 +111,11 @@ function InteractiveAvatar() {
     }
   });
 
+  /* ---------- disconnect listener helper ---------- */
+  const wireDisconnect = (avatar: any) => {
+    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => recycleSession("disconnect"));
+  };
+
   /* ---------- manual start (Voice/Text) ---------- */
   const startSession = useMemoizedFn(async (needVoice: boolean) => {
     try {
