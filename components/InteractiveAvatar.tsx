@@ -63,6 +63,33 @@ function InteractiveAvatar() {
       throw error;
     }
   }
+  
+  /** плавный «ресет» каждые 3 минуты */
+  useEffect(() => {
+    const TEN_MIN = 3 * 60 * 1000;        // 600 000 мс
+
+    const id = setInterval(async () => {
+      if (!avatar.current) return;         // на всякий случай
+
+      try {
+        // 1) культурно остановить текущую сессию
+        await avatar.current.stopAvatar();
+
+        // 2) получить свежий токен
+        const token = await fetchAccessToken();
+
+        // 3) запустить заново с тем же config
+        await avatar.current.startAvatar(token, config);
+
+        console.info("Avatar session recycled");
+      } catch (e) {
+        console.error("Recycle failed", e);
+      }
+    }, TEN_MIN);
+
+    // очистка таймера, если компонент размонтируют
+    return () => clearInterval(id);
+  }, []);
 
   const startSessionV2 = useMemoizedFn(async (isVoiceChat: boolean) => {
     try {
