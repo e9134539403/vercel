@@ -82,7 +82,7 @@ function InteractiveAvatar() {
       const avatar = initAvatar(token);
       await startAvatar(configRef.current);
       if (isVoiceChatRef.current) {
-        await startVoiceChat({ ...configRef.current, voiceChatIdleTimeout: 900 });
+        await startVoiceChat();
       }
       wireStreamEvents(avatar);
       console.info("✅ Avatar session recycled");
@@ -99,7 +99,7 @@ function InteractiveAvatar() {
       wireStreamEvents(avatar);
       await startAvatar(configRef.current);
       if (needVoice) {
-        await startVoiceChat({ ...configRef.current, voiceChatIdleTimeout: 900 });
+        await startVoiceChat();
         isVoiceChatRef.current = true;
       }
     } catch (e) {
