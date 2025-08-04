@@ -22,6 +22,14 @@ import { MessageHistory } from "./AvatarSession/MessageHistory";
 
 import { AVATARS } from "@/app/lib/constants";
 
+/**
+ * ------------------------------------------------------------------------------------------------------------------
+ * ⚙️  ️DEFAULT CONFIG
+ * ------------------------------------------------------------------------------------------------------------------
+ *  • Подняли provider до `GLADIA` — у него лучше шумодав.
+ *  • Порог confidence 0.8 — игнорируем случайные выкрики/смех.
+ * ------------------------------------------------------------------------------------------------------------------
+ */
 const DEFAULT_CONFIG: StartAvatarRequest = {
   quality: AvatarQuality.Low,
   avatarName: AVATARS[0].avatar_id,
@@ -34,7 +42,8 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
   language: "en",
   voiceChatTransport: VoiceChatTransport.WEBSOCKET,
   sttSettings: {
-    provider: STTProvider.DEEPGRAM,
+    provider: STTProvider.GLADIA,
+    confidence: 0.8,
   },
 };
 
@@ -47,58 +56,75 @@ function InteractiveAvatar() {
 
   const mediaStream = useRef<HTMLVideoElement>(null);
 
+  /** Получаем access‑token с бэкенда */
   async function fetchAccessToken() {
-    try {
-      const response = await fetch("/api/get-access-token", {
-        method: "POST",
-      });
-      const token = await response.text();
-
-      console.log("Access Token:", token); // Log the token to verify
-
-      return token;
-    } catch (error) {
-      console.error("Error fetching access token:", error);
-      throw error;
-    }
+    const response = await fetch("/api/get-access-token", { method: "POST" });
+    if (!response.ok) throw new Error("Token request failed");
+    return response.text();
   }
 
+  /**
+   * --------------------------------------------------------------------------------------------------------------
+   * 🚀  startSessionV2
+   * --------------------------------------------------------------------------------------------------------------
+   *  • 1) создаём avatar
+   *  • 2) сразу выключаем его "слух" (stopListening) — чтоб смех не прерывал речь
+   *  • 3) навешиваем хендлеры start/stop talking → управляем очередностью речи
+   * --------------------------------------------------------------------------------------------------------------
+   */
   const startSessionV2 = useMemoizedFn(async (isVoiceChat: boolean) => {
     try {
       const newToken = await fetchAccessToken();
+
+      // 1️⃣ инициализируем
       const avatar = initAvatar(newToken);
 
-      avatar.on(StreamingEvents.AVATAR_START_TALKING, (e) => {
-        console.log("Avatar started talking", e);
+      // 2️⃣ по умолчанию не слушаем, ждём пока аватар не договорит
+      await avatar.stopListening();
+
+      // 3️⃣ управляем очередностью: когда аватар говорит → mute, когда закончил → unmute
+      avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
+        avatar.stopListening();
       });
-      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, (e) => {
-        console.log("Avatar stopped talking", e);
-      });
-      avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
-        console.log("Stream disconnected");
-      });
-      avatar.on(StreamingEvents.STREAM_READY, (event) => {
-        console.log(">>>>> Stream ready:", event.detail);
-      });
-      avatar.on(StreamingEvents.USER_START, (event) => {
-        console.log(">>>>> User started talking:", event);
-      });
-      avatar.on(StreamingEvents.USER_STOP, (event) => {
-        console.log(">>>>> User stopped talking:", event);
-      });
-      avatar.on(StreamingEvents.USER_END_MESSAGE, (event) => {
-        console.log(">>>>> User end message:", event);
-      });
-      avatar.on(StreamingEvents.USER_TALKING_MESSAGE, (event) => {
-        console.log(">>>>> User talking message:", event);
-      });
-      avatar.on(StreamingEvents.AVATAR_TALKING_MESSAGE, (event) => {
-        console.log(">>>>> Avatar talking message:", event);
-      });
-      avatar.on(StreamingEvents.AVATAR_END_MESSAGE, (event) => {
-        console.log(">>>>> Avatar end message:", event);
+      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
+        avatar.startListening();
       });
 
+      // ──────────────────────────────────────────────────────────────────────────
+      // DEBUG‑hендлеры (оставил как были)
+      // ──────────────────────────────────────────────────────────────────────────
+      avatar.on(StreamingEvents.AVATAR_START_TALKING, (e) =>
+        console.log("Avatar started talking", e)
+      );
+      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, (e) =>
+        console.log("Avatar stopped talking", e)
+      );
+      avatar.on(StreamingEvents.STREAM_DISCONNECTED, () =>
+        console.log("Stream disconnected")
+      );
+      avatar.on(StreamingEvents.STREAM_READY, (event) =>
+        console.log(">>>>> Stream ready:", event.detail)
+      );
+      avatar.on(StreamingEvents.USER_START, (event) =>
+        console.log(">>>>> User started talking:", event)
+      );
+      avatar.on(StreamingEvents.USER_STOP, (event) =>
+        console.log(">>>>> User stopped talking:", event)
+      );
+      avatar.on(StreamingEvents.USER_END_MESSAGE, (event) =>
+        console.log(">>>>> User end message:", event)
+      );
+      avatar.on(StreamingEvents.USER_TALKING_MESSAGE, (event) =>
+        console.log(">>>>> User talking message:", event)
+      );
+      avatar.on(StreamingEvents.AVATAR_TALKING_MESSAGE, (event) =>
+        console.log(">>>>> Avatar talking message:", event)
+      );
+      avatar.on(StreamingEvents.AVATAR_END_MESSAGE, (event) =>
+        console.log(">>>>> Avatar end message:", event)
+      );
+
+      // 4️⃣ стартуем сессию
       await startAvatar(config);
 
       if (isVoiceChat) {
@@ -109,10 +135,12 @@ function InteractiveAvatar() {
     }
   });
 
+  // Очищаем сессию при размонтировании компонента
   useUnmount(() => {
     stopAvatar();
   });
 
+  // Подключаем медиапоток к <video>
   useEffect(() => {
     if (stream && mediaStream.current) {
       mediaStream.current.srcObject = stream;
