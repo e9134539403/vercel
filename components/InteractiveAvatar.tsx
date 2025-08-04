@@ -60,11 +60,18 @@ function InteractiveAvatar() {
 
   /* ---------- helper to soft‑restart only media pipeline ---------- */
   const softRestartTracks = useMemoizedFn(async () => {
+    if (sessionState !== StreamingAvatarSessionState.CONNECTED) return;
     try {
       await startVoiceChat();
       console.info("🟢 soft restart tracks done");
-    } catch (e) {
-      console.error("soft restart failed", e);
+    } catch (e: any) {
+      // HeyGen вернёт 400, если already listening; 401, если токен устарел
+      const msg = e?.message || "";
+      if (msg.includes("400") || msg.includes("401")) {
+        console.warn("soft restart: benign error", msg);
+      } else {
+        console.error("soft restart failed", e);
+      }
     }
   });
 
@@ -98,15 +105,39 @@ function InteractiveAvatar() {
   /* ---------- freeze watchdog ---------- */
   useEffect(() => {
     let prev = 0;
-    const id = setInterval(() => {
+    let freezeCount = 0;
+    const SOFT_LIMIT = 3; // после 3 подряд фризов делаем hard‑reset
+
+    const id = setInterval(async () => {
       const v = videoRef.current;
       if (!v) return;
+
       if (v.currentTime === prev && sessionState === StreamingAvatarSessionState.CONNECTED) {
         console.warn("⚠️ media freeze → soft restart");
-        softRestartTracks();
+        await softRestartTracks();
+        freezeCount += 1;
+
+        if (freezeCount >= SOFT_LIMIT) {
+          console.warn("⚠️ soft restarts exhausted → HARD reset");
+          freezeCount = 0;
+          try {
+            await stopAvatar();
+            await new Promise(r => setTimeout(r, 600));
+            const tok = await fetchAccessToken();
+            const avatar = initAvatar(tok);
+            avatar.on(StreamingEvents.STREAM_DISCONNECTED, softRestartTracks);
+            await startAvatar(configRef.current);
+            if (isVoiceChatRef.current) await startVoiceChat();
+          } catch (e) {
+            console.error("hard reset failed", e);
+          }
+        }
+      } else {
+        freezeCount = 0; // кадр движется – обнуляем счётчик
       }
       prev = v.currentTime;
     }, 10_000);
+
     return () => clearInterval(id);
   }, [softRestartTracks, sessionState]);
 
