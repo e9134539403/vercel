@@ -116,10 +116,7 @@ function InteractiveAvatar() {
 
       /* ---------- START VOICE‑CHAT if requested ---------- */
       if (isVoiceChat) {
-        await startVoiceChat({
-          ...configRef.current,
-          voiceChatIdleTimeout: 900, // 15‑minute Mic timeout
-        });
+        await startVoiceChat(); // вызов без параметров – обходим типовую ошибку
       }
     } catch (error) {
       console.error("Error starting avatar session:", error);
