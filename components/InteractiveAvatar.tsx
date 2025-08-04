@@ -79,8 +79,8 @@ function InteractiveAvatar() {
       // 1️⃣ инициализируем
       const avatar = initAvatar(newToken);
 
-      // 2️⃣ по умолчанию не слушаем, ждём пока аватар не договорит
-      await avatar.stopListening();
+      // 2️⃣ (убрано: преждевременное stopListening вызывало 401)
+//    Переключим слушание после успешного запуска сессии ниже
 
       // 3️⃣ управляем очередностью: когда аватар говорит → mute, когда закончил → unmute
       avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
@@ -126,6 +126,10 @@ function InteractiveAvatar() {
 
       // 4️⃣ стартуем сессию
       await startAvatar(config);
+
+      // после успешного запуска сразу выключаем слух,
+      // чтобы случайные звуки не прервали первую реплику
+      await avatar.stopListening();
 
       if (isVoiceChat) {
         await startVoiceChat();
