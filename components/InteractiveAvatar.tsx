@@ -46,6 +46,11 @@ function InteractiveAvatar() {
 
   const [config, setConfig] = useState<StartAvatarRequest>(DEFAULT_CONFIG);
 
+const configRef = useRef(config);
+useEffect(() => {               // следим, чтобы ref всегда был свежим
+  configRef.current = config;
+}, [config]);
+  
   const mediaStream = useRef<HTMLVideoElement>(null);
 
   async function fetchAccessToken() {
@@ -79,7 +84,7 @@ function InteractiveAvatar() {
   await initAvatar(token);        // обновили внутренний avatar-ref
 
   // 3) запустить заново с тем же config
-  await startAvatar(config);
+  await startAvatar(configRef.current);
 
   console.info("Avatar session recycled");
 } catch (e) {
