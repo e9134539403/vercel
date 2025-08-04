@@ -89,7 +89,7 @@ function InteractiveAvatar() {
 
     // очистка таймера, если компонент размонтируют
     return () => clearInterval(id);
-  }, []);
+  }, [stopAvatar, initAvatar, startAvatar, fetchAccessToken, config]);
 
   const startSessionV2 = useMemoizedFn(async (isVoiceChat: boolean) => {
     try {
