@@ -137,6 +137,26 @@ function InteractiveAvatar() {
     }
   }, [stream]);
 
+  /* ---------- freeze watchdog (audio / video) ---------- */
+  useEffect(() => {
+    let prev = 0;
+    const id = setInterval(async () => {
+      const v = videoRef.current;
+      if (!v) return;
+      if (v.currentTime === prev) {
+        // видео не продвигается → пробуем перезапустить только voice‑chat
+        console.warn("⚠️ media freeze detected → soft restart tracks");
+        try {
+          await startVoiceChat(); // создает новый audio/media pipeline без закрытия peer‑connection
+        } catch (e) {
+          console.error("soft restart failed", e);
+        }
+      }
+      prev = v.currentTime;
+    }, 10_000); // проверяем каждые 10 с
+    return () => clearInterval(id);
+  }, [startVoiceChat]);
+
   /* ---------- JSX ---------- */
   return (
     <div className="w-full flex flex-col gap-4">
