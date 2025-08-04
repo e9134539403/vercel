@@ -1,4 +1,4 @@
-// --- InteractiveAvatar.tsx (refactored to fix freeze & auto‑restart voice) ---
+// --- InteractiveAvatar.tsx (stable recycle, 3‑min timer) ---
 
 import {
   AvatarQuality,
@@ -23,7 +23,7 @@ import { LoadingIcon } from "./Icons";
 import { MessageHistory } from "./AvatarSession/MessageHistory";
 import { AVATARS } from "@/app/lib/constants";
 
-/* --------------- DEFAULT CONFIG --------------- */
+/* ---------- DEFAULT CONFIG ---------- */
 const DEFAULT_CONFIG: StartAvatarRequest = {
   quality: AvatarQuality.Low,
   avatarName: AVATARS[0].avatar_id,
@@ -34,13 +34,12 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
     model: ElevenLabsModel.eleven_flash_v2_5,
   },
   language: "en",
-  activityIdleTimeout: 900, // 15‑minute peer‑connection timeout
+  activityIdleTimeout: 900, // 15‑min peer‑conn timeout
   voiceChatTransport: VoiceChatTransport.WEBSOCKET,
   sttSettings: { provider: STTProvider.DEEPGRAM },
 };
 
 function InteractiveAvatar() {
-  /* ---------- SDK hooks ---------- */
   const {
     initAvatar,
     startAvatar,
@@ -50,53 +49,70 @@ function InteractiveAvatar() {
   } = useStreamingAvatarSession();
   const { startVoiceChat } = useVoiceChat();
 
-  /* ---------- STATE ---------- */
   const [config, setConfig] = useState<StartAvatarRequest>(DEFAULT_CONFIG);
-  const configRef = useRef(config); // always‑fresh ссыль
+  const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
 
-  const isVoiceChatRef = useRef(false); // помним, активен ли voice‑chat
+  const isVoiceChatRef = useRef(false);
+  const recyclingRef = useRef(false); // <-- блокируем параллельные recycle
 
-  /* ---------- HTMLVideoElement ref ---------- */
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  /* ---------- access‑token ---------- */
   const fetchAccessToken = async () => {
     const res = await fetch("/api/get-access-token", { method: "POST" });
     return res.text();
   };
 
-  /* ---------- soft recycle каждые 10 мин ---------- */
+  /* ---------- timer: recycle каждые 3 мин ---------- */
   useEffect(() => {
     const THREE_MIN = 3 * 60 * 1000;
-    const id = setInterval(recycleSession, THREE_MIN);
+    const id = setInterval(() => recycleSession("timer"), THREE_MIN);
     return () => clearInterval(id);
   }, []);
 
-  const recycleSession = useMemoizedFn(async () => {
+  /* ---------- recycleSession ---------- */
+  const recycleSession = useMemoizedFn(async (reason: string) => {
+    if (recyclingRef.current) return;           // уже в процессе
+    recyclingRef.current = true;
+    console.warn(`♻️ recycle triggered (${reason})`);
+
     try {
-      await stopAvatar();
-      await new Promise(r => setTimeout(r, 500));
+      await stopAvatar();                       // посылаем stop
+      // ждём когда сессия реально станет INACTIVE (max 5 c)
+      await waitUntil(() => sessionState === StreamingAvatarSessionState.INACTIVE, 5000);
 
       const token = await fetchAccessToken();
       const avatar = initAvatar(token);
+      wireDisconnect(avatar);
       await startAvatar(configRef.current);
+
       if (isVoiceChatRef.current) {
         await startVoiceChat();
       }
-      wireStreamEvents(avatar);
       console.info("✅ Avatar session recycled");
     } catch (e) {
-      console.error("♻️ recycle failed", e);
+      console.error("recycle failed", e);
+    } finally {
+      recyclingRef.current = false;
     }
   });
 
-  /* ---------- start session by click ---------- */
+  /* ---------- helper waitUntil ---------- */
+  const waitUntil = (cond: () => boolean, timeout = 5000, step = 100) =>
+    new Promise<void>((res, rej) => {
+      const start = Date.now();
+      const t = setInterval(() => {
+        if (cond()) { clearInterval(t); res(); }
+        if (Date.now() - start > timeout) { clearInterval(t); rej(new Error("waitUntil timeout")); }
+      }, step);
+    });
+
+  /* ---------- connect buttons ---------- */
   const startSession = useMemoizedFn(async (needVoice: boolean) => {
     try {
       const token = await fetchAccessToken();
       const avatar = initAvatar(token);
-      wireStreamEvents(avatar);
+      wireDisconnect(avatar);
       await startAvatar(configRef.current);
       if (needVoice) {
         await startVoiceChat();
@@ -107,18 +123,14 @@ function InteractiveAvatar() {
     }
   });
 
-  /* ---------- bind STREAM_DISCONNECTED ---------- */
-  const wireStreamEvents = (avatar: any) => {
-    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
-      console.warn("STREAM_DISCONNECTED → auto‑recycle");
-      recycleSession();
-    });
+  /* ---------- STREAM_DISCONNECTED listener ---------- */
+  const wireDisconnect = (avatar: any) => {
+    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => recycleSession("disconnect"));
   };
 
-  /* ---------- cleanup ---------- */
   useUnmount(() => stopAvatar());
 
-  /* ---------- render video ---------- */
+  /* ---------- video binding ---------- */
   useEffect(() => {
     if (stream && videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -137,7 +149,6 @@ function InteractiveAvatar() {
             <AvatarConfig config={config} onConfigChange={setConfig} />
           )}
         </div>
-
         <div className="flex flex-col items-center gap-3 p-4 border-t border-zinc-700">
           {sessionState === StreamingAvatarSessionState.CONNECTED ? (
             <AvatarControls />
