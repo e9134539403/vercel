@@ -22,9 +22,6 @@ import { MessageHistory } from "./AvatarSession/MessageHistory";
 
 import { AVATARS } from "@/app/lib/constants";
 
-/**
- * DEFAULT_CONFIG — можно поменять avatarName / knowledgeId при желании.
- */
 const DEFAULT_CONFIG: StartAvatarRequest = {
   quality: AvatarQuality.Low,
   avatarName: AVATARS[0].avatar_id,
@@ -37,96 +34,124 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
   language: "en",
   voiceChatTransport: VoiceChatTransport.WEBSOCKET,
   sttSettings: {
-    provider: STTProvider.GLADIA,
-    confidence: 0.8,
+    provider: STTProvider.DEEPGRAM,
   },
 };
 
 function InteractiveAvatar() {
   const { initAvatar, startAvatar, stopAvatar, sessionState, stream } =
     useStreamingAvatarSession();
-
-  // ⬇️  вытаскиваем micTrackRef для физического mute / unmute
-  const { startVoiceChat, micTrackRef } = useVoiceChat();
+  const { startVoiceChat } = useVoiceChat();
 
   const [config, setConfig] = useState<StartAvatarRequest>(DEFAULT_CONFIG);
+
   const mediaStream = useRef<HTMLVideoElement>(null);
 
-  /** Получаем access‑token с бэкенда */
   async function fetchAccessToken() {
-    const res = await fetch("/api/get-access-token", { method: "POST" });
-    if (!res.ok) throw new Error("Token request failed");
-    return res.text();
+    try {
+      const response = await fetch("/api/get-access-token", {
+        method: "POST",
+      });
+      const token = await response.text();
+
+      console.log("Access Token:", token); // Log the token to verify
+
+      return token;
+    } catch (error) {
+      console.error("Error fetching access token:", error);
+      throw error;
+    }
   }
 
-  /** Запустить сессию */
-  const startSession = useMemoizedFn(async (withVoice: boolean) => {
+  const startSessionV2 = useMemoizedFn(async (isVoiceChat: boolean) => {
     try {
-      const token = await fetchAccessToken();
+      const newToken = await fetchAccessToken();
+      const avatar = initAvatar(newToken);
 
-      /** 1️⃣ создаём avatar */
-      const avatar = initAvatar(token);
-
-      /** 2️⃣ управляем очередностью речи и микрофоном */
-      avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
-        avatar.stopListening();
-        micTrackRef.current && (micTrackRef.current.enabled = false); // 🔇 mute
+      avatar.on(StreamingEvents.AVATAR_START_TALKING, (e) => {
+        console.log("Avatar started talking", e);
+      });
+      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, (e) => {
+        console.log("Avatar stopped talking", e);
+      });
+      avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
+        console.log("Stream disconnected");
+      });
+      avatar.on(StreamingEvents.STREAM_READY, (event) => {
+        console.log(">>>>> Stream ready:", event.detail);
+      });
+      avatar.on(StreamingEvents.USER_START, (event) => {
+        console.log(">>>>> User started talking:", event);
+      });
+      avatar.on(StreamingEvents.USER_STOP, (event) => {
+        console.log(">>>>> User stopped talking:", event);
+      });
+      avatar.on(StreamingEvents.USER_END_MESSAGE, (event) => {
+        console.log(">>>>> User end message:", event);
+      });
+      avatar.on(StreamingEvents.USER_TALKING_MESSAGE, (event) => {
+        console.log(">>>>> User talking message:", event);
+      });
+      avatar.on(StreamingEvents.AVATAR_TALKING_MESSAGE, (event) => {
+        console.log(">>>>> Avatar talking message:", event);
+      });
+      avatar.on(StreamingEvents.AVATAR_END_MESSAGE, (event) => {
+        console.log(">>>>> Avatar end message:", event);
       });
 
-      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
-        micTrackRef.current && (micTrackRef.current.enabled = true);  // 🔊 unmute
-        avatar.startListening();
-      });
-
-      /** 3️⃣ запускаем сессию */
       await startAvatar(config);
 
-      // первая реплика — отключаем слух, чтобы шум не прерывал
-      await avatar.stopListening();
-
-      /** 4️⃣ голосовой чат, если выбран */
-      if (withVoice) await startVoiceChat();
-    } catch (e) {
-      console.error("Error starting session", e);
+      if (isVoiceChat) {
+        await startVoiceChat();
+      }
+    } catch (error) {
+      console.error("Error starting avatar session:", error);
     }
   });
 
-  /** Чистим сессию при размонтировании */
-  useUnmount(stopAvatar);
+  useUnmount(() => {
+    stopAvatar();
+  });
 
-  /** Подключаем медиапоток к <video> */
   useEffect(() => {
     if (stream && mediaStream.current) {
       mediaStream.current.srcObject = stream;
-      mediaStream.current.onloadedmetadata = () => mediaStream.current!.play();
+      mediaStream.current.onloadedmetadata = () => {
+        mediaStream.current!.play();
+      };
     }
-  }, [stream]);
+  }, [mediaStream, stream]);
 
   return (
     <div className="w-full flex flex-col gap-4">
-      <div className="flex flex-col bg-zinc-900 rounded-xl overflow-hidden">
-        <div className="relative w-full aspect-video flex items-center justify-center">
+      <div className="flex flex-col rounded-xl bg-zinc-900 overflow-hidden">
+        <div className="relative w-full aspect-video overflow-hidden flex flex-col items-center justify-center">
           {sessionState !== StreamingAvatarSessionState.INACTIVE ? (
             <AvatarVideo ref={mediaStream} />
           ) : (
             <AvatarConfig config={config} onConfigChange={setConfig} />
           )}
         </div>
-        <div className="p-4 border-t border-zinc-700 flex flex-col items-center gap-3">
+        <div className="flex flex-col gap-3 items-center justify-center p-4 border-t border-zinc-700 w-full">
           {sessionState === StreamingAvatarSessionState.CONNECTED ? (
             <AvatarControls />
           ) : sessionState === StreamingAvatarSessionState.INACTIVE ? (
-            <div className="flex gap-4">
-              <Button onClick={() => startSession(true)}>Start Voice Chat</Button>
-              <Button onClick={() => startSession(false)}>Start Text Chat</Button>
+            <div className="flex flex-row gap-4">
+              <Button onClick={() => startSessionV2(true)}>
+                Start Voice Chat
+              </Button>
+              <Button onClick={() => startSessionV2(false)}>
+                Start Text Chat
+              </Button>
             </div>
           ) : (
             <LoadingIcon />
           )}
         </div>
       </div>
-
-      {sessionState === StreamingAvatarSessionState.CONNECTED && <MessageHistory />}
+      {sessionState === StreamingAvatarSessionState.CONNECTED && (
+        <MessageHistory />
+      )}
     </div>
   );
 }
