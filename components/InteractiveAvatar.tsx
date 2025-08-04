@@ -72,36 +72,44 @@ function InteractiveAvatar() {
 
   /* ---------- recycleSession ---------- */
   const recycleSession = useMemoizedFn(async (reason: string) => {
-    if (recyclingRef.current) return; // already running
+    if (recyclingRef.current) return;
     recyclingRef.current = true;
     console.warn(`♻️ recycle triggered (${reason})`);
 
-    try {
-      if (sessionState === StreamingAvatarSessionState.CONNECTED && reason !== "disconnect") {
-        await stopAvatar();
-        await new Promise(r => setTimeout(r, 400));
-      }
+    const hardStop = async () => {
+      try { await stopAvatar(); } catch { /* ignore */ }
+      await new Promise(r => setTimeout(r, 600));
+    };
 
+    try {
+      await hardStop();
       const token = await fetchAccessToken();
       const avatar = initAvatar(token);
-      wireDisconnect(avatar); // <<— теперь функция объявлена ниже
-      await startAvatar(configRef.current);
+      wireDisconnect(avatar);
 
-      if (isVoiceChatRef.current) {
-        await startVoiceChat();
-      }
-      console.info("✅ Avatar session recycled (fast)");
+      const safeStart = async () => {
+        try {
+          await startAvatar(configRef.current);
+        } catch (err: any) {
+          if (err?.message?.includes("already an active session")) {
+            console.warn("retry startAvatar after active-session error");
+            await hardStop();
+            await startAvatar(configRef.current);
+          } else {
+            throw err;
+          }
+        }
+      };
+
+      await safeStart();
+      if (isVoiceChatRef.current) await startVoiceChat();
+      console.info("✅ Avatar session recycled (forced)");
     } catch (e) {
       console.error("recycle failed", e);
     } finally {
       recyclingRef.current = false;
     }
   });
-
-  /* ---------- wireDisconnect helper ---------- */
-  const wireDisconnect = (avatar: any) => {
-    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => recycleSession("disconnect"));
-  };
 
   /* ---------- manual start (Voice/Text) ---------- */
   const startSession = useMemoizedFn(async (needVoice: boolean) => {
