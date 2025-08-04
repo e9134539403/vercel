@@ -50,7 +50,6 @@ export const useVoiceChat = () => {
       }
 
       // 3️⃣ Передаём поток в SDK
-      await avatarRef.current.attachUserAudio(stream);
       await avatarRef.current.startVoiceChat({ isInputAudioMuted });
 
       setIsVoiceChatLoading(false);
