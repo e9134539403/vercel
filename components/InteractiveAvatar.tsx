@@ -1,7 +1,14 @@
+// components/InteractiveAvatar.tsx
 import {
+  AvatarQuality,
   StreamingEvents,
+  VoiceChatTransport,
+  VoiceEmotion,
   StartAvatarRequest,
+  STTProvider,
+  ElevenLabsModel,
 } from "@heygen/streaming-avatar";
+
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useMemoizedFn, useUnmount } from "ahooks";
 
@@ -11,348 +18,361 @@ import { AvatarVideo } from "./AvatarSession/AvatarVideo";
 import { useStreamingAvatarSession } from "./logic/useStreamingAvatarSession";
 import { AvatarControls } from "./AvatarSession/AvatarControls";
 import { useVoiceChat } from "./logic/useVoiceChat";
-import { StreamingAvatarProvider, StreamingAvatarSessionState } from "./logic";
+import {
+  StreamingAvatarProvider,
+  StreamingAvatarSessionState,
+} from "./logic";
 import { LoadingIcon } from "./Icons";
 import { MessageHistory } from "./AvatarSession/MessageHistory";
+import { AVATARS } from "@/app/lib/constants";
 
-// Импортируем конфигурации
-import { 
-  getOptimalConfig, 
-  testConnectionSpeed, 
-  checkTriggerWords,
-  TRIGGER_CONFIG,
-  logPerformanceStats,
-  AUDIO_ONLY_CONFIG 
-} from "../utils/lowBandwidthConfig";
+// ========== КОНФИГУРАЦИЯ ДЛЯ СЛАБОГО ИНТЕРНЕТА ==========
+const PODCAST_CONFIG: StartAvatarRequest = {
+  quality: AvatarQuality.Low, // Минимальное качество для экономии трафика
+  avatarName: AVATARS[0].avatar_id,
+  knowledgeId: undefined, // Отключаем Knowledge Base для локального контроля
+  voice: {
+    rate: 1.5,
+    emotion: VoiceEmotion.EXCITED,
+    model: ElevenLabsModel.eleven_flash_v2_5,
+  },
+  language: "ru", // Русский язык для подкаста
+  activityIdleTimeout: 900, // 15 минут таймаут
+  
+  // КРИТИЧНО для мобильного интернета:
+  iceTransportPolicy: "relay", // Форсируем TURN для обхода NAT
+  turnServer: "turn:global.relay.heygen.com:443?transport=tcp", // TCP надежнее UDP
+  video: true, // Можно отключить для экономии трафика: false
+  
+  voiceChatTransport: VoiceChatTransport.WEBSOCKET, // WebSocket надежнее
+  sttSettings: { 
+    provider: STTProvider.DEEPGRAM,
+  },
+};
 
-interface ConnectionInfo {
-  speed: number;
-  quality: 'poor' | 'moderate' | 'good';
-  recommendation: string;
-}
+// Ключевые слова для активации аватара
+const TRIGGER_WORDS = ["влобстер", "лобстер", "в лобстер"];
 
-function SmartInteractiveAvatar() {
+// Проверка наличия ключевых слов
+const containsTriggerWord = (text: string): boolean => {
+  const lowerText = text.toLowerCase();
+  return TRIGGER_WORDS.some(word => lowerText.includes(word));
+};
+
+function InteractiveAvatar() {
   const { initAvatar, startAvatar, stopAvatar, sessionState, stream } =
     useStreamingAvatarSession();
   const { startVoiceChat } = useVoiceChat();
 
-  const [config, setConfig] = useState<StartAvatarRequest>(getOptimalConfig());
-  const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
-  const [isAudioOnly, setIsAudioOnly] = useState(false);
-  const [filterActive, setFilterActive] = useState(true);
+  const [config, setConfig] = useState<StartAvatarRequest>(PODCAST_CONFIG);
+  const [isListeningMode, setIsListeningMode] = useState(true); // Режим прослушивания по умолчанию
+  const [connectionStatus, setConnectionStatus] = useState<string>("idle");
+  const [lastUserMessage, setLastUserMessage] = useState<string>("");
   
   const videoRef = useRef<HTMLVideoElement>(null);
-  const avatarRef = useRef<any>(null);
-  const isProcessingRef = useRef(false);
+  const avatarInstanceRef = useRef<any>(null);
+  const configRef = useRef(config);
+  const isVoiceChatRef = useRef(false);
+  const freezeCountRef = useRef(0);
   const reconnectAttemptsRef = useRef(0);
+  const MAX_RECONNECT_ATTEMPTS = 3;
+  const MAX_FREEZE_COUNT = 2; // Уменьшаем для быстрого реагирования
 
-  // Тестирование соединения при загрузке
   useEffect(() => {
-    const checkConnection = async () => {
-      console.log("🔍 Testing connection speed...");
-      const speed = await testConnectionSpeed();
-      
-      let quality: ConnectionInfo['quality'] = 'good';
-      let recommendation = 'Стандартное качество видео';
-      
-      if (speed < 50) {
-        quality = 'poor';
-        recommendation = 'Рекомендуется режим "только аудио"';
-        setIsAudioOnly(true);
-      } else if (speed < 100) {
-        quality = 'moderate';
-        recommendation = 'Низкое качество видео для стабильности';
-      }
-      
-      setConnectionInfo({ speed, quality, recommendation });
-      
-      // Автоматически выбираем оптимальную конфигурацию
-      const optimalConfig = getOptimalConfig(speed);
-      setConfig(optimalConfig);
-      
-      logPerformanceStats();
-    };
+    configRef.current = config;
+  }, [config]);
 
-    checkConnection();
-  }, []);
-
-  // Получение токена доступа
-  const fetchAccessToken = async () => {
-    try {
-      const response = await fetch("/api/get-access-token", {
-        method: "POST",
-      });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+  // Функция получения токена с retry логикой
+  const fetchAccessToken = async (retries = 3): Promise<string> => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch("/api/get-access-token", {
+          method: "POST",
+          signal: AbortSignal.timeout(10000), // 10 секунд таймаут
+        });
+        
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.text();
+      } catch (error) {
+        console.error(`Token fetch attempt ${i + 1} failed:`, error);
+        if (i === retries - 1) throw error;
+        await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Экспоненциальная задержка
       }
-      
-      const token = await response.text();
-      console.log("✅ Access token obtained");
-      return token;
-    } catch (error) {
-      console.error("❌ Error fetching access token:", error);
-      throw error;
     }
+    throw new Error("Failed to fetch token after retries");
   };
 
-  // Умная обработка пользовательских сообщений
-  const handleUserMessage = useCallback((event: any) => {
-    const userMessage = event.detail?.message || "";
-    console.log("👤 User said:", userMessage);
-
-    // Если фильтр отключен - пропускаем все
-    if (!filterActive) {
-      console.log("🔓 Filter disabled - message passed");
-      return;
-    }
-
-    // Проверяем триггерные слова
-    const hasTrigger = checkTriggerWords(userMessage);
+  // Мягкий рестарт только медиа-потоков
+  const softRestartTracks = useMemoizedFn(async () => {
+    if (sessionState !== StreamingAvatarSessionState.CONNECTED) return;
     
-    if (!hasTrigger) {
-      console.log("🚫 Message blocked - no trigger words found");
-      
-      // Быстро прерываем аватара
-      if (avatarRef.current) {
-        try {
-          avatarRef.current.interrupt();
-        } catch (error) {
-          console.warn("⚠️ Could not interrupt avatar:", error);
-        }
-      }
-      return;
-    }
-
-    console.log("✅ Message approved - trigger words detected");
-  }, [filterActive]);
-
-  // Умное переподключение с экспоненциальной задержкой
-  const handleReconnect = useCallback(async () => {
-    const maxAttempts = 3;
-    reconnectAttemptsRef.current += 1;
-    
-    console.log(`🔄 Reconnect attempt ${reconnectAttemptsRef.current}/${maxAttempts}`);
-    
-    if (reconnectAttemptsRef.current > maxAttempts) {
-      console.error("❌ Max reconnection attempts reached");
-      return;
-    }
-
-    // Экспоненциальная задержка: 2s, 4s, 8s
-    const delay = Math.pow(2, reconnectAttemptsRef.current) * 1000;
-    
-    setTimeout(async () => {
-      try {
-        if (sessionState === StreamingAvatarSessionState.CONNECTED) {
-          await startVoiceChat();
-          console.log("✅ Reconnected successfully");
-          reconnectAttemptsRef.current = 0; // Сброс счетчика при успехе
-        }
-      } catch (error) {
-        console.error("❌ Reconnection failed:", error);
-        handleReconnect(); // Повторная попытка
-      }
-    }, delay);
-  }, [sessionState, startVoiceChat]);
-
-  // Запуск сессии с обработкой ошибок
-  const startSession = useMemoizedFn(async (needVoice: boolean) => {
-    if (isProcessingRef.current) {
-      console.log("⏳ Session start already in progress");
-      return;
-    }
-    
-    isProcessingRef.current = true;
-    reconnectAttemptsRef.current = 0;
-
     try {
-      const token = await fetchAccessToken();
-      const avatar = initAvatar(token);
-      avatarRef.current = avatar;
-
-      // Подписываемся только на необходимые события
-      avatar.on(StreamingEvents.USER_TALKING_MESSAGE, handleUserMessage);
-      avatar.on(StreamingEvents.STREAM_DISCONNECTED, handleReconnect);
+      console.info("🔄 Attempting soft restart...");
+      setConnectionStatus("reconnecting");
       
-      // Опциональные события для мониторинга
-      avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
-        console.log("🗣️ Avatar speaking");
-      });
-      
-      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
-        console.log("🤐 Avatar silent");
-      });
-
-      // Используем актуальную конфигурацию
-      const currentConfig = isAudioOnly ? AUDIO_ONLY_CONFIG : config;
-      await startAvatar(currentConfig);
-      
-      if (needVoice) {
+      // Пробуем переподключить только голосовой чат
+      if (isVoiceChatRef.current) {
         await startVoiceChat();
       }
-
-      console.log("🎉 Avatar session started successfully");
-    } catch (error) {
-      console.error("❌ Failed to start session:", error);
       
-      // Показываем пользователю понятную ошибку
-      alert(`Не удалось запустить аватара: ${error.message}. Проверьте интернет соединение.`);
-    } finally {
-      isProcessingRef.current = false;
+      freezeCountRef.current = 0;
+      setConnectionStatus("connected");
+      console.info("✅ Soft restart successful");
+    } catch (error: any) {
+      console.error("❌ Soft restart failed:", error);
+      setConnectionStatus("error");
+      
+      // Если мягкий рестарт не помог, пробуем жесткий
+      if (freezeCountRef.current >= MAX_FREEZE_COUNT) {
+        await hardReset();
+      }
     }
   });
 
-  // Переключение режима аудио/видео
-  const toggleAudioOnly = useCallback(() => {
-    setIsAudioOnly(!isAudioOnly);
-    console.log(`🔄 Switched to ${!isAudioOnly ? 'audio-only' : 'video'} mode`);
-  }, [isAudioOnly]);
-
-  // Переключение фильтра
-  const toggleFilter = useCallback(() => {
-    setFilterActive(!filterActive);
-    console.log(`🔄 Message filter ${!filterActive ? 'enabled' : 'disabled'}`);
-  }, [filterActive]);
-
-  // Очистка при размонтировании
-  useUnmount(() => {
-    if (avatarRef.current) {
-      avatarRef.current.off(StreamingEvents.USER_TALKING_MESSAGE, handleUserMessage);
-      avatarRef.current.off(StreamingEvents.STREAM_DISCONNECTED, handleReconnect);
+  // Жесткая перезагрузка всей сессии
+  const hardReset = useMemoizedFn(async () => {
+    if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      console.error("🚫 Max reconnection attempts reached");
+      setConnectionStatus("failed");
+      return;
     }
-    stopAvatar();
-    console.log("🧹 Avatar cleaned up");
+
+    console.warn("🔴 Initiating hard reset...");
+    reconnectAttemptsRef.current++;
+    freezeCountRef.current = 0;
+
+    try {
+      // Полная остановка
+      await stopAvatar();
+      await new Promise(r => setTimeout(r, 2000)); // Даем время на очистку
+      
+      // Новая инициализация
+      const token = await fetchAccessToken();
+      const avatar = initAvatar(token);
+      
+      // Переподключаем обработчики
+      setupEventHandlers(avatar);
+      
+      // Запускаем с актуальной конфигурацией
+      await startAvatar(configRef.current);
+      
+      if (isVoiceChatRef.current) {
+        await startVoiceChat();
+      }
+      
+      setConnectionStatus("connected");
+      console.info("✅ Hard reset successful");
+    } catch (error) {
+      console.error("❌ Hard reset failed:", error);
+      setConnectionStatus("failed");
+    }
   });
+
+  // Настройка обработчиков событий
+  const setupEventHandlers = useCallback((avatar: any) => {
+    avatarInstanceRef.current = avatar;
+
+    // Обработка отключения
+    avatar.on(StreamingEvents.STREAM_DISCONNECTED, async () => {
+      console.warn("⚠️ Stream disconnected");
+      setConnectionStatus("disconnected");
+      await softRestartTracks();
+    });
+
+    // Перехват сообщений пользователя для локальной фильтрации
+    avatar.on(StreamingEvents.USER_END_MESSAGE, (event: any) => {
+      const message = event?.detail?.message || "";
+      setLastUserMessage(message);
+      
+      // Локальная проверка ключевых слов
+      if (!containsTriggerWord(message) && isListeningMode) {
+        console.log("🔇 Ignoring message (no trigger word):", message);
+        
+        // Отправляем пустой ответ чтобы аватар молчал
+        if (avatarInstanceRef.current) {
+          avatarInstanceRef.current.speak({
+            text: "ㅤ", // Невидимый символ
+            taskType: "TALK",
+            taskMode: "ASYNC",
+          });
+        }
+        return false; // Блокируем дальнейшую обработку
+      }
+      
+      console.log("🎯 Trigger word detected, processing:", message);
+    });
+
+    // Мониторинг качества соединения
+    avatar.on(StreamingEvents.CONNECTION_QUALITY_CHANGED, (event: any) => {
+      const quality = event?.detail;
+      console.log("📶 Connection quality:", quality);
+      
+      if (quality === "poor" || quality === "disconnected") {
+        setConnectionStatus("poor");
+      }
+    });
+
+    // Остальные обработчики для логирования
+    avatar.on(StreamingEvents.STREAM_READY, () => {
+      console.log("✅ Stream ready");
+      setConnectionStatus("connected");
+      reconnectAttemptsRef.current = 0;
+    });
+
+    avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
+      console.log("🗣️ Avatar speaking");
+    });
+
+    avatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
+      console.log("🤐 Avatar stopped");
+    });
+  }, [isListeningMode]);
+
+  // Запуск сессии с оптимизациями
+  const startSession = useMemoizedFn(async (enableVoice: boolean) => {
+    try {
+      setConnectionStatus("connecting");
+      
+      // Получаем токен с retry
+      const token = await fetchAccessToken();
+      
+      // Инициализация
+      const avatar = initAvatar(token);
+      setupEventHandlers(avatar);
+      
+      // Запуск с настройками для слабого интернета
+      await startAvatar(configRef.current);
+      
+      if (enableVoice) {
+        await startVoiceChat();
+        isVoiceChatRef.current = true;
+      }
+      
+      setConnectionStatus("connected");
+    } catch (error) {
+      console.error("❌ Session start failed:", error);
+      setConnectionStatus("error");
+      
+      // Автоматическая попытка переподключения
+      setTimeout(() => {
+        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          hardReset();
+        }
+      }, 5000);
+    }
+  });
+
+  // Мониторинг зависаний видео
+  useEffect(() => {
+    if (sessionState !== StreamingAvatarSessionState.CONNECTED) return;
+
+    let prevTime = 0;
+    const checkInterval = setInterval(async () => {
+      const video = videoRef.current;
+      if (!video || !video.srcObject) return;
+
+      const currentTime = video.currentTime;
+      
+      if (currentTime === prevTime && !video.paused) {
+        freezeCountRef.current++;
+        console.warn(`⚠️ Video freeze detected (${freezeCountRef.current})`);
+        
+        if (freezeCountRef.current >= MAX_FREEZE_COUNT) {
+          await softRestartTracks();
+        }
+      } else {
+        freezeCountRef.current = 0;
+      }
+      
+      prevTime = currentTime;
+    }, 5000); // Проверяем каждые 5 секунд
+
+    return () => clearInterval(checkInterval);
+  }, [sessionState, softRestartTracks]);
 
   // Привязка видео потока
   useEffect(() => {
-    if (stream && videoRef.current && !isAudioOnly) {
+    if (stream && videoRef.current) {
       videoRef.current.srcObject = stream;
       videoRef.current.onloadedmetadata = () => {
-        videoRef.current?.play().catch(console.error);
+        videoRef.current?.play().catch(e => {
+          console.error("Video play error:", e);
+        });
       };
     }
-  }, [stream, isAudioOnly]);
+  }, [stream]);
+
+  // Очистка при размонтировании
+  useUnmount(() => {
+    stopAvatar();
+  });
 
   return (
     <div className="w-full flex flex-col gap-4">
-      {/* Панель статуса соединения */}
-      {connectionInfo && (
-        <div className={`p-3 rounded-lg text-sm ${
-          connectionInfo.quality === 'poor' 
-            ? 'bg-red-900 text-red-200' 
-            : connectionInfo.quality === 'moderate'
-            ? 'bg-yellow-900 text-yellow-200'
-            : 'bg-green-900 text-green-200'
-        }`}>
-          <div className="flex justify-between items-center">
-            <span>
-              📡 Соединение: {connectionInfo.speed.toFixed(1)} Мбит/с 
-              ({connectionInfo.quality === 'poor' ? 'Слабое' : 
-                connectionInfo.quality === 'moderate' ? 'Умеренное' : 'Хорошее'})
-            </span>
-            <span className="text-xs">{connectionInfo.recommendation}</span>
-          </div>
-        </div>
-      )}
+      {/* Статус соединения */}
+      <div className="flex items-center gap-2 p-2 bg-zinc-800 rounded">
+        <div className={`w-3 h-3 rounded-full ${
+          connectionStatus === 'connected' ? 'bg-green-500' :
+          connectionStatus === 'connecting' || connectionStatus === 'reconnecting' ? 'bg-yellow-500' :
+          connectionStatus === 'error' || connectionStatus === 'failed' ? 'bg-red-500' :
+          'bg-gray-500'
+        }`} />
+        <span className="text-sm text-zinc-300">
+          Статус: {connectionStatus} | 
+          Режим: {isListeningMode ? '🔇 Слушаю' : '🎙️ Активен'} |
+          Последнее: {lastUserMessage.slice(0, 30)}...
+        </span>
+        <Button 
+          className="ml-auto !py-1 !px-3 text-xs"
+          onClick={() => setIsListeningMode(!isListeningMode)}
+        >
+          {isListeningMode ? 'Активировать' : 'В режим прослушивания'}
+        </Button>
+      </div>
 
-      {/* Основной интерфейс */}
       <div className="flex flex-col rounded-xl bg-zinc-900 overflow-hidden">
         <div className="relative w-full aspect-video overflow-hidden flex flex-col items-center justify-center">
           {sessionState !== StreamingAvatarSessionState.INACTIVE ? (
-            isAudioOnly ? (
-              <div className="w-full h-full bg-gradient-to-b from-zinc-800 to-zinc-900 flex items-center justify-center">
-                <div className="text-center">
-                  <div className="text-6xl mb-4">🎵</div>
-                  <div className="text-xl text-zinc-300">Режим "только аудио"</div>
-                  <div className="text-sm text-zinc-500 mt-2">Видео отключено для экономии трафика</div>
-                </div>
-              </div>
-            ) : (
-              <AvatarVideo ref={videoRef} />
-            )
+            <AvatarVideo ref={videoRef} />
           ) : (
             <AvatarConfig config={config} onConfigChange={setConfig} />
           )}
         </div>
         
-        <div className="flex flex-col gap-3 items-center justify-center p-4 border-t border-zinc-700">
+        <div className="flex flex-col gap-3 items-center justify-center p-4 border-t border-zinc-700 w-full">
           {sessionState === StreamingAvatarSessionState.CONNECTED ? (
             <AvatarControls />
           ) : sessionState === StreamingAvatarSessionState.INACTIVE ? (
             <div className="flex flex-col gap-3 items-center">
               <div className="flex flex-row gap-4">
                 <Button onClick={() => startSession(true)}>
-                  🎤 Голосовой режим
+                  🎙️ Запустить для подкаста
                 </Button>
                 <Button onClick={() => startSession(false)}>
-                  ⌨️ Текстовый режим
+                  💬 Только текст
                 </Button>
               </div>
-              
-              {/* Дополнительные настройки */}
-              <div className="flex gap-2">
-                <Button 
-                  className={`!text-xs !py-1 !px-3 ${isAudioOnly ? '!bg-blue-600' : '!bg-zinc-600'}`}
-                  onClick={toggleAudioOnly}
-                >
-                  {isAudioOnly ? '🔊 Аудио' : '📹 Видео'}
-                </Button>
-                
-                <Button 
-                  className={`!text-xs !py-1 !px-3 ${filterActive ? '!bg-green-600' : '!bg-red-600'}`}
-                  onClick={toggleFilter}
-                >
-                  {filterActive ? '🛡️ Фильтр ВКЛ' : '🔓 Фильтр ВЫКЛ'}
-                </Button>
+              <div className="text-xs text-zinc-400 text-center">
+                Рекомендуется: используйте проводной интернет или стабильный Wi-Fi
               </div>
             </div>
           ) : (
-            <div className="flex flex-col items-center gap-2">
-              <LoadingIcon />
-              <span className="text-sm text-zinc-400">
-                {reconnectAttemptsRef.current > 0 
-                  ? `Переподключение... (${reconnectAttemptsRef.current}/3)`
-                  : 'Подключение...'
-                }
-              </span>
-            </div>
+            <LoadingIcon />
           )}
         </div>
       </div>
       
-      {/* Панель управления и статистики */}
       {sessionState === StreamingAvatarSessionState.CONNECTED && (
-        <div className="bg-zinc-800 rounded-lg p-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-            <div className="text-sm">
-              <div className="text-zinc-300 font-medium mb-1">🎯 Триггерные слова:</div>
-              <div className="text-zinc-400 text-xs">
-                {TRIGGER_CONFIG.words.join(", ")}
-              </div>
-            </div>
-            
-            <div className="text-sm">
-              <div className="text-zinc-300 font-medium mb-1">📊 Статус:</div>
-              <div className="text-zinc-400 text-xs">
-                Режим: {isAudioOnly ? 'Аудио' : 'Видео'} | 
-                Фильтр: {filterActive ? 'Активен' : 'Отключен'}
-              </div>
-            </div>
-          </div>
-          
-          <MessageHistory />
-        </div>
+        <MessageHistory />
       )}
     </div>
   );
 }
 
-export default function SmartInteractiveAvatarWrapper() {
+export default function InteractiveAvatarWrapper() {
   return (
     <StreamingAvatarProvider basePath={process.env.NEXT_PUBLIC_BASE_API_URL}>
-      <SmartInteractiveAvatar />
+      <InteractiveAvatar />
     </StreamingAvatarProvider>
   );
 }
