@@ -1,4 +1,5 @@
 // --- InteractiveAvatar.tsx (no global recycle, only soft restarts) ---
+
 import {
   AvatarQuality,
   StreamingEvents,
@@ -8,7 +9,6 @@ import {
   STTProvider,
   ElevenLabsModel,
 } from "@heygen/streaming-avatar";
-
 import { useEffect, useRef, useState } from "react";
 import { useMemoizedFn, useUnmount } from "ahooks";
 
@@ -18,10 +18,7 @@ import { AvatarVideo } from "./AvatarSession/AvatarVideo";
 import { useStreamingAvatarSession } from "./logic/useStreamingAvatarSession";
 import { AvatarControls } from "./AvatarSession/AvatarControls";
 import { useVoiceChat } from "./logic/useVoiceChat";
-import {
-  StreamingAvatarProvider,
-  StreamingAvatarSessionState,
-} from "./logic";
+import { StreamingAvatarProvider, StreamingAvatarSessionState } from "./logic";
 import { LoadingIcon } from "./Icons";
 import { MessageHistory } from "./AvatarSession/MessageHistory";
 import { AVATARS } from "@/app/lib/constants";
@@ -38,12 +35,6 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
   },
   language: "en",
   activityIdleTimeout: 900,
-
-  // ← обход мобильных/строгих NAT-сетей
-  iceTransportPolicy: "relay",
-  turnServer: "turn:global.relay.heygen.com:443?transport=tcp",
-  // video: false, // раскомментируйте, если нужен только звук
-
   voiceChatTransport: VoiceChatTransport.WEBSOCKET,
   sttSettings: { provider: STTProvider.DEEPGRAM },
 };
@@ -67,13 +58,14 @@ function InteractiveAvatar() {
     return res.text();
   };
 
-  /* ---------- helper to soft-restart only media pipeline ---------- */
+  /* ---------- helper to soft‑restart only media pipeline ---------- */
   const softRestartTracks = useMemoizedFn(async () => {
     if (sessionState !== StreamingAvatarSessionState.CONNECTED) return;
     try {
       await startVoiceChat();
       console.info("🟢 soft restart tracks done");
     } catch (e: any) {
+      // HeyGen вернёт 400, если already listening; 401, если токен устарел
       const msg = e?.message || "";
       if (msg.includes("400") || msg.includes("401")) {
         console.warn("soft restart: benign error", msg);
@@ -114,16 +106,13 @@ function InteractiveAvatar() {
   useEffect(() => {
     let prev = 0;
     let freezeCount = 0;
-    const SOFT_LIMIT = 3;
+    const SOFT_LIMIT = 3; // после 3 подряд фризов делаем hard‑reset
 
     const id = setInterval(async () => {
       const v = videoRef.current;
       if (!v) return;
 
-      if (
-        v.currentTime === prev &&
-        sessionState === StreamingAvatarSessionState.CONNECTED
-      ) {
+      if (v.currentTime === prev && sessionState === StreamingAvatarSessionState.CONNECTED) {
         console.warn("⚠️ media freeze → soft restart");
         await softRestartTracks();
         freezeCount += 1;
@@ -133,7 +122,7 @@ function InteractiveAvatar() {
           freezeCount = 0;
           try {
             await stopAvatar();
-            await new Promise((r) => setTimeout(r, 600));
+            await new Promise(r => setTimeout(r, 600));
             const tok = await fetchAccessToken();
             const avatar = initAvatar(tok);
             avatar.on(StreamingEvents.STREAM_DISCONNECTED, softRestartTracks);
@@ -144,7 +133,7 @@ function InteractiveAvatar() {
           }
         }
       } else {
-        freezeCount = 0;
+        freezeCount = 0; // кадр движется – обнуляем счётчик
       }
       prev = v.currentTime;
     }, 10_000);
@@ -176,18 +165,14 @@ function InteractiveAvatar() {
           )}
         </div>
       </div>
-      {sessionState === StreamingAvatarSessionState.CONNECTED && (
-        <MessageHistory />
-      )}
+      {sessionState === StreamingAvatarSessionState.CONNECTED && <MessageHistory />}
     </div>
   );
 }
 
 export default function InteractiveAvatarWrapper() {
   return (
-    <StreamingAvatarProvider
-      basePath={process.env.NEXT_PUBLIC_BASE_API_URL}
-    >
+    <StreamingAvatarProvider basePath={process.env.NEXT_PUBLIC_BASE_API_URL}>
       <InteractiveAvatar />
     </StreamingAvatarProvider>
   );
